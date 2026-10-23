@@ -1,0 +1,197 @@
+# =========================================================================
+# RESILIENCE RADAR — Bronze Data Generation Parameters
+# Every generator in src/bronze/generators/ reads from this file.
+# Change scale/shape here — never hardcode values in Python.
+# =========================================================================
+
+global:
+  seed: 42                        # single seed shared across all generators for full reproducibility
+  start_date: "2022-01-01"
+  end_date: "2024-12-31"
+  currency_base: "USD"
+
+
+# -------------------------------------------------------------------------
+# CUSTOMERS
+# -------------------------------------------------------------------------
+customers:
+  n_customers: 8000
+  segment_weights:
+    Consumer: 0.55
+    Corporate: 0.30
+    "Home Office": 0.15
+  regions: ["North America", "LATAM", "EMEA", "APAC"]
+  duplicate_injection_rate: 0.03   # % of near-duplicate records injected on purpose
+                                    # (same person, typo'd/re-cased email) -- gives the
+                                    # silver-layer MDM/fuzzy-match step real work to do
+
+
+# -------------------------------------------------------------------------
+# PRODUCTS
+# -------------------------------------------------------------------------
+products:
+  n_products: 500
+  categories:
+    - { name: "Electronics",      weight: 0.25 }
+    - { name: "Apparel",          weight: 0.20 }
+    - { name: "Home & Garden",    weight: 0.20 }
+    - { name: "Sporting Goods",   weight: 0.15 }
+    - { name: "Office Supplies",  weight: 0.20 }
+  departments: ["Consumer", "Commercial"]
+  unit_cost_lognormal:
+    mean: 3.0                      # ln-scale mean -> actual costs cluster in the $15-60 range
+    sigma: 0.7
+  unit_weight_gamma:
+    shape: 2.0
+    scale: 1.5
+  margin_multiplier_range: [1.3, 2.5]     # msrp = unit_cost * multiplier
+  is_active_weights:                        # raw source inconsistency injected on purpose
+    "Y": 0.50
+    "N": 0.10
+    "1": 0.35
+    "0": 0.05
+
+
+# -------------------------------------------------------------------------
+# ORDERS (order lines)
+# -------------------------------------------------------------------------
+orders:
+  n_order_lines: 180000
+  avg_lines_per_order: 3                     # drives how order_ids repeat across lines
+  sku_popularity_distribution: "zipf"        # few SKUs dominate volume, like real retail
+  quantity_poisson_lambda: 5
+  discount_beta_params: [2, 8]               # Beta(2,8) * 30 -> most discounts cluster 0-15%
+  price_noise_std: 0.05                      # +/- noise around catalog MSRP (promos, regional variance)
+
+  shipping_mode_weights:
+    "Standard Class": 0.55
+    "First Class": 0.20
+    "Second Class": 0.15
+    "Same Day": 0.10
+
+  order_status_weights:
+    COMPLETE: 0.75
+    PENDING: 0.08
+    CANCELED: 0.07
+    ON_HOLD: 0.05
+    PROCESSING: 0.05
+
+  promised_days_weights:
+    2: 0.20
+    4: 0.50
+    7: 0.30
+
+  markets: ["LATAM", "USCA", "Europe", "Africa", "Pacific Asia"]
+  regions: ["North America", "LATAM", "EMEA", "APAC"]
+
+  # late_delivery_risk is correlated with shipping_mode/promised_days
+  # (not purely random) so Model 3's classifier has real signal to learn
+  late_delivery_risk_model:
+    base_risk_by_mode:
+      "Same Day": 0.35
+      "Second Class": 0.25
+      "First Class": 0.15
+      "Standard Class": 0.12
+    promised_days_2_penalty: 0.15    # added risk when promise window is tight
+
+
+# -------------------------------------------------------------------------
+# ORDER LIFECYCLE EVENTS
+# -------------------------------------------------------------------------
+order_lifecycle:
+  event_sequence: ["PLACED", "PICKED", "PACKED", "SHIPPED", "DELIVERED"]
+  inter_event_gap_gamma:
+    shape: 2.0
+    scale: 6.0               # hours between consecutive milestones
+  return_rate: 0.04           # % of delivered orders that also get a RETURNED event
+
+
+# -------------------------------------------------------------------------
+# SUPPLIERS
+# -------------------------------------------------------------------------
+suppliers:
+  n_suppliers: 150
+  tier_weights:
+    "Tier 1": 0.30
+    "Tier 2": 0.45
+    "Tier 3": 0.25
+  countries: ["China", "Vietnam", "Mexico", "India", "USA", "Germany", "Poland", "Brazil"]
+  certification_weights:
+    ISO9001: 0.50
+    Uncertified: 0.35
+    ISO14001: 0.15
+  onboarding_date_range_start: "2015-01-01"
+
+
+# -------------------------------------------------------------------------
+# PURCHASE ORDERS (supplier POs)
+# -------------------------------------------------------------------------
+purchase_orders:
+  n_po_lines: 25000
+  destination_country: "USA"
+
+  # KEY REALISM CHOICE: lead-time variance is tied to supplier_tier, not
+  # independent per PO -- this gives Model 1 (lead-time distribution fitting)
+  # genuine structure to recover instead of fitting pure noise.
+  reliability_tiers:
+    "Tier 1": { base_lt_days: 10, cv: 0.15 }
+    "Tier 2": { base_lt_days: 18, cv: 0.35 }
+    "Tier 3": { base_lt_days: 28, cv: 0.60 }
+
+  incoterms: ["FOB", "CIF", "DDP", "EXW"]
+  freight_modes_weights:
+    Ocean: 0.50
+    Air: 0.20
+    Road: 0.20
+    Rail: 0.10
+
+  quantity_range: [50, 2000]
+  unit_cost_lognormal: { mean: 2.8, sigma: 0.6 }
+  still_open_rate: 0.05        # % of POs with no actual_delivery_date yet (in transit)
+
+
+# -------------------------------------------------------------------------
+# SHIPMENTS (outbound, customer-facing)
+# -------------------------------------------------------------------------
+shipments:
+  carrier_names: ["FedEx", "UPS", "DHL", "Maersk", "DB Schenker"]
+  transit_days_lognormal:
+    mean: 1.8
+    sigma: 0.4
+  mode_transit_multiplier:        # shipping_mode-aware transit adjustment
+    "Same Day": 0.3
+    "First Class": 0.6
+    "Second Class": 1.0
+    "Standard Class": 1.4
+  freight_cost_gamma: { shape: 2.5, scale: 15 }
+  distance_km_gamma: { shape: 3.0, scale: 300 }
+
+
+# -------------------------------------------------------------------------
+# INVENTORY SNAPSHOTS
+# -------------------------------------------------------------------------
+inventory_snapshots:
+  n_locations: 12
+  n_skus_tracked: 150              # subset of full catalog, controls table volume
+  location_type_options: ["DC", "Plant", "Store"]
+  avg_daily_demand_poisson_lambda: 10
+  initial_stock_days_of_supply: 30
+  reorder_point_days: 7             # reorder triggered when on_hand+on_order <= 7 days of demand
+  reorder_qty_days: 21              # replenishment order size, expressed in days of demand
+  lead_time_days_range: [5, 20]
+  reorder_point_service_level_z: 1.65   # z-score for 95% service level, used downstream by Model 4
+
+
+# -------------------------------------------------------------------------
+# REFERENCE DATA (tariffs, FX, calendar)
+# -------------------------------------------------------------------------
+reference_data:
+  tariff_categories: ["Electronics", "Apparel", "Home & Garden", "Sporting Goods", "Office Supplies"]
+  tariff_rate_range_pct: [0, 25]
+  tariff_effective_date: "2023-01-01"
+
+  currencies: ["EUR", "MXN", "CNY", "INR", "BRL", "VND"]
+  fx_starting_rate_range: [0.1, 7.0]     # plausible starting FX rate vs USD
+  fx_daily_volatility: 0.002               # daily random-walk std dev
+
+  holiday_countries: ["US", "MX", "CN", "DE", "BR"]

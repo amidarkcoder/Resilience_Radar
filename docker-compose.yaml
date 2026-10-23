@@ -1,0 +1,199 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  env_file: .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres_metadata:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    WAREHOUSE_CONN_STRING: postgresql+psycopg2://${WAREHOUSE_DB_USER}:${WAREHOUSE_DB_PASSWORD}@postgres_warehouse:5432/${WAREHOUSE_DB_NAME}
+  volumes:                                        # ✅ restored inside the anchor
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./src:/opt/airflow/src
+    - ./sql:/opt/airflow/sql
+    - ./quality:/opt/airflow/quality
+    - ./config:/opt/airflow/config
+  depends_on:                                     # ✅ restored inside the anchor
+    postgres_metadata:
+      condition: service_healthy
+    postgres_warehouse:
+      condition: service_healthy
+
+services:
+
+  # =====================================================================
+  # WAREHOUSE DATABASE
+  # =====================================================================
+  postgres_warehouse:
+    image: postgres:15
+    container_name: postgres_warehouse
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_DB_USER}
+      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      POSTGRES_DB: ${WAREHOUSE_DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+    - warehouse_pgdata:/var/lib/postgresql/data
+    - ./sql/bronze/run_all_bronze_ddl.sql:/docker-entrypoint-initdb.d/01_bronze.sql:ro
+    - ./sql/silver/run_all_silver_ddl.sql:/docker-entrypoint-initdb.d/02_silver.sql:ro
+    - ./sql/gold/run_all_gold_ddl.sql:/docker-entrypoint-initdb.d/03_gold.sql:ro
+    - ./sql:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WAREHOUSE_DB_USER} -d ${WAREHOUSE_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # =====================================================================
+  # METADATA DATABASE
+  # =====================================================================
+  postgres_metadata:
+    image: postgres:15
+    container_name: postgres_metadata
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME}
+      SUPERSET_DB_USER: ${SUPERSET_DB_USER}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD}
+      SUPERSET_DB_NAME: ${SUPERSET_DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - metadata_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # =====================================================================
+  # AIRFLOW
+  # =====================================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USER} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL}
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      - airflow-init
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    depends_on:
+      - airflow-init
+
+  # =====================================================================
+  # SUPERSET
+  # =====================================================================
+  superset:
+    build:
+      context: .
+      dockerfile: docker/superset.Dockerfile
+    container_name: superset
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      DATABASE_DIALECT: postgresql
+      DATABASE_USER: admin  
+      DATABASE_PASSWORD: admin
+      DATABASE_HOST: postgres_metadata
+      DATABASE_PORT: 5432
+      DATABASE_DB: ${SUPERSET_DB_NAME}
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+      - ./bi/dashboards_export:/app/dashboards_export
+    depends_on:
+      postgres_metadata:
+        condition: service_healthy
+      postgres_warehouse:
+        condition: service_healthy
+
+  superset-init:
+    build:
+      context: .
+      dockerfile: docker/superset.Dockerfile
+    container_name: superset_init
+    env_file: .env
+    environment:
+      DATABASE_DIALECT: postgresql
+      DATABASE_USER: ${SUPERSET_DB_USER}
+      DATABASE_PASSWORD: ${SUPERSET_DB_PASSWORD}
+      DATABASE_HOST: postgres_metadata
+      DATABASE_PORT: 5432
+      DATABASE_DB: ${SUPERSET_DB_NAME}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        superset db upgrade
+        superset fab create-admin \
+          --username ${SUPERSET_ADMIN_USER} \
+          --password ${SUPERSET_ADMIN_PASSWORD} \
+          --firstname Admin --lastname User \
+          --email ${SUPERSET_ADMIN_EMAIL}
+        superset init
+    depends_on:
+      postgres_metadata:
+        condition: service_healthy
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - postgres_warehouse
+
+volumes:
+  grafana_data:
+  warehouse_pgdata:
+  metadata_pgdata:
+  superset_home:
+  
+
+networks:
+  default:
+    name: resilience_radar_network

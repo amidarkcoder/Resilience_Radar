@@ -1,0 +1,1 @@
+"""Bronze layer: synthetic data generation + raw ingestion into bronze_* tables."""

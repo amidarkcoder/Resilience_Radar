@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/
+airflow.db
+airflow-webserver.pid
+*.csv
+*.parquet
+data/raw/
+data/processed/
+postgres_data/
+grafana_data/
+.DS_Store
+.idea/
+.vscode/
